@@ -1,0 +1,153 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME = 'orionops-node-service'
+        APP_DIR = 'apps/node-service'
+        IMAGE_NAME = 'orionops-node-service'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        CONTAINER_NAME = 'orionops-node-service'
+        CONTAINER_PORT = '3000'
+        HOST_PORT = '3000'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '10',
+                artifactNumToKeepStr: '5'
+            )
+        )
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code...'
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir("${APP_DIR}") {
+                    echo 'Installing Node.js dependencies...'
+                    sh 'npm ci'
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                dir("${APP_DIR}") {
+                    echo 'Running application tests...'
+                    sh 'npm test'
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo "Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+
+                sh """
+                    docker build \
+                        -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                        -t ${IMAGE_NAME}:latest \
+                        ${APP_DIR}
+                """
+            }
+        }
+
+        stage('Docker Image Check') {
+            steps {
+                echo 'Verifying Docker image...'
+
+                sh """
+                    docker image inspect ${IMAGE_NAME}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Run Container') {
+            steps {
+                echo 'Starting container for validation...'
+
+                sh """
+                    docker rm -f ${CONTAINER_NAME} || true
+
+                    docker run -d \
+                        --name ${CONTAINER_NAME} \
+                        -p ${HOST_PORT}:${CONTAINER_PORT} \
+                        ${IMAGE_NAME}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                echo 'Checking application health...'
+
+                sh '''
+                    for i in {1..10}; do
+                        if curl -fsS http://localhost:3000/health; then
+                            echo "Application health check passed."
+                            exit 0
+                        fi
+
+                        echo "Application is not ready yet. Retrying..."
+                        sleep 3
+                    done
+
+                    echo "Application health check failed."
+                    exit 1
+                '''
+            }
+        }
+
+        stage('API Validation') {
+            steps {
+                echo 'Validating API endpoint...'
+
+                sh '''
+                    curl -fsS http://localhost:3000/api
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo """
+            ==========================================
+            OrionOps CI Pipeline Successful
+            Application : ${APP_NAME}
+            Image       : ${IMAGE_NAME}:${IMAGE_TAG}
+            Build       : ${BUILD_NUMBER}
+            ==========================================
+            """
+        }
+
+        failure {
+            echo """
+            ==========================================
+            OrionOps CI Pipeline Failed
+            Build: ${BUILD_NUMBER}
+            Check Jenkins logs for details.
+            ==========================================
+            """
+        }
+
+        always {
+            echo 'Cleaning up Docker container...'
+
+            sh """
+                docker rm -f ${CONTAINER_NAME} || true
+            """
+        }
+    }
+}
